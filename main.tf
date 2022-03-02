@@ -4,9 +4,15 @@ resource "google_service_account" "vm" {
   display_name = "Service Account for compute engine"
 }
 
-resource "google_project_iam_member" "vm" {
+resource "google_project_iam_member" "vm_logs" {
   project            = var.project_id
   role               = "roles/logging.logWriter"
+  member             = "serviceAccount:${google_service_account.vm.email}"
+}
+
+resource "google_project_iam_member" "vm_metric" {
+  project            = var.project_id
+  role               = "roles/monitoring.metricWriter"
   member             = "serviceAccount:${google_service_account.vm.email}"
 }
 
@@ -76,7 +82,7 @@ chmod +x ./activate.sh && ./activate.sh
 
 expressvpn preferences set send_diagnostics false
 expressvpn preferences set auto_connect true
-# expressvpn connect "${var.vpn_location}"
+expressvpn connect "${var.vpn_location}"
 
 sleep 10
 
@@ -89,13 +95,41 @@ cat <<EOF >> ./run.sh
 
 cd /load-testing
 git pull
-siege -c 100 -t 28m -f /load-testing/target.txt
+expressvpn disconnect
+sleep 5
+expressvpn connect "${var.vpn_location}"
+siege -c 100 -t 27m -f /load-testing/target.txt
 EOF
 
 chmod +x ./run.sh
 
-echo '*/5 * * * * root /run.sh > /dev/stdout' >> /cron-config
-crontab /cron-config
+touch /var/log/run.log
+
+(crontab -l ; echo '*/30 * * * * /usr/bin/sudo /run.sh >> /var/log/run.log 2>&1') | crontab -
+
+
+curl -sSO https://dl.google.com/cloudagents/add-logging-agent-repo.sh
+bash add-logging-agent-repo.sh --also-install
+
+sudo tee /etc/google-fluentd/config.d/siege.conf <<EOF
+<source>
+    @type tail
+    <parse>
+        # 'none' indicates the log is unstructured (text).
+        @type none
+    </parse>
+    # The path of the log file.
+    path /var/log/run.log
+    # The path of the position file that records where in the log file
+    # we have processed already. This is useful when the agent
+    # restarts.
+    pos_file /var/lib/google-fluentd/pos/siege.pos
+    read_from_head true
+    # The log tag for this log input.
+    tag siege
+</source>
+EOF
+service google-fluentd restart
 
 EOT
 }
